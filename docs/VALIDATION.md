@@ -1,0 +1,42 @@
+# Validation — 20 November 2026
+
+- 39 tests passed against the Home Assistant 2025.8.0 fixture on Python 3.13.
+- Ruff checks and Python compilation passed.
+- The install ZIP was built from an explicit file allowlist and its CRCs checked.
+- No live RTT requests, live Home Assistant changes or HACS install were made.
+
+Coverage includes config and options flows, both station-event directions,
+terminal retention and reload, stale recovery, registry cleanup, midnight/DST,
+the 30-minute polling boundary, shared rolling quotas and persisted budgets,
+authentication requests, aiohttp retries, redirects and malformed responses.
+
+## Reproduce on Linux
+
+```sh
+python3.13 -m venv .venv
+.venv/bin/python -m pip install -r requirements-ha-test.txt
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+```
+
+## Local Windows accommodation
+
+The Home Assistant test harness imports the POSIX `resource` module. Local
+verification injected an empty module for that unused runner import. The
+harness's blanket socket-disable hook was bypassed to permit Windows asyncio
+loopback initialization; its loopback host allowlist remained active, and all
+RTT HTTP calls were mocked. Neither shim is part of the integration or CI.
+
+Test-only native wheel substitutions were ciso8601 2.4.1 and lru-dict 1.4.1;
+production Home Assistant requirements are unchanged. pycares is constrained
+below 5 in the HA test requirements for compatibility with baseline aiodns.
+Linux CI uses the baseline's native dependency pins without these substitutions.
+
+## Before distribution
+
+Metadata points to the public repository `https://github.com/c-scoot/ha-rtt`
+with `@c-scoot` as maintainer. GitHub Actions runs the HACS validator,
+hassfest and tests on pushes and pull requests. Inspect the checks for the
+current commit before installing or tagging a release.
+Use an actual RTT token and a disposable HA installation to verify field
+availability and the HACS install/update path. No live token is in this project.

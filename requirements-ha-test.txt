@@ -1,0 +1,4 @@
+-r requirements-test.txt
+pytest-homeassistant-custom-component==0.13.269
+# HA 2025.8 pins aiodns 3.5.0, which uses the pycares 4 API.
+pycares>=4.9,<5

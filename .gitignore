@@ -1,0 +1,11 @@
+.venv/
+.venv-ha/
+.python/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.zip
+.env
+dist/
