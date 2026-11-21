@@ -185,6 +185,8 @@ def _apply_visit(
         reason=reason,
         platform=(platform.actual or platform.planned) if platform else None,
         platform_source=None,
+        planned_platform=platform.planned if platform else None,
+        confirmed_platform=platform.actual if platform else None,
     )
     if result["platform"] is not None:
         result["platform_source"] = "actual" if platform.actual else "planned"
@@ -213,6 +215,8 @@ def evaluate(
         "delay_minutes": None,
         "platform": None,
         "platform_source": None,
+        "planned_platform": None,
+        "confirmed_platform": None,
         "reason": None,
         "next_poll": None,
     }
@@ -243,3 +247,15 @@ def evaluate(
             next_poll = min(instant + _FAR_INTERVAL, near_from)
         result["next_poll"] = min(next_poll, expiry).isoformat()
     return result
+
+
+def platform_status(snapshot: Mapping[str, Any]) -> str:
+    """Describe platform certainty without inferring confirmation from equality."""
+    if not snapshot.get("platform"):
+        return "not_available"
+    source = snapshot.get("platform_source")
+    if source == "actual":
+        return "confirmed"
+    if source == "planned":
+        return "planned"
+    return "unconfirmed"

@@ -9,6 +9,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     # Build an allowlist instead of redacting a response that may echo tokens.
     return {
         "station": entry.data.get("station"),
+        "stations": runtime.coordinator.stations,
         "tracks": {
             key: call.to_dict() for key, call in runtime.coordinator.tracks.items()
         },

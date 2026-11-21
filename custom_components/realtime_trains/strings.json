@@ -5,16 +5,22 @@
       "user": {
         "title": "Connect Realtime Trains",
         "description": "Enter your personal NG API token from api-portal.rtt.io. Both access and refresh tokens are supported.",
-        "data": {"token": "API token"}
+        "data": {
+          "token": "API token"
+        }
       },
       "station": {
         "title": "Choose your home station",
-        "data": {"station": "Home station"}
+        "data": {
+          "station": "Home station"
+        }
       },
       "reauth_confirm": {
         "title": "Update your API token",
         "description": "Your station and tracked trains will be kept.",
-        "data": {"token": "API token"}
+        "data": {
+          "token": "API token"
+        }
       }
     },
     "error": {
@@ -31,20 +37,41 @@
   },
   "options": {
     "step": {
-      "init": {"menu_options": {"add_track": "Add train", "remove_track": "Remove train"}},
+      "init": {
+        "menu_options": {
+          "add_track": "Add train",
+          "remove_track": "Remove train",
+          "manage_stations": "Manage home stations"
+        }
+      },
+      "manage_stations": {
+        "title": "Manage home stations",
+        "description": "Choose one or more home stations. Removing a station from this list keeps its existing tracked trains until you remove them separately.",
+        "data": {
+          "stations": "Home stations"
+        }
+      },
       "add_track": {
         "title": "Find a train",
-        "description": "Search arrivals or departures at {station} during the hour starting at this UK local date and time. Each choice tracks one dated train.",
-        "data": {"direction": "Event to track", "window_start": "Search from (UK time)"}
+        "description": "Choose a home station and search arrivals or departures during the hour starting at this UK local date and time. Each choice tracks one dated train at that station.",
+        "data": {
+          "station": "Home station",
+          "direction": "Event to track",
+          "window_start": "Search from (UK time)"
+        }
       },
       "choose_track": {
         "title": "Choose a train to monitor",
         "description": "Tracking ends when the selected arrival or departure is reported at home. Final results remain until removed.",
-        "data": {"track": "Train"}
+        "data": {
+          "track": "Train"
+        }
       },
       "remove_track": {
         "title": "Remove tracked trains",
-        "data": {"track": "Trains to remove"}
+        "data": {
+          "track": "Trains to remove"
+        }
       }
     },
     "error": {
@@ -53,29 +80,71 @@
       "rate_limited": "The shared request allowance is exhausted. Please try again after it replenishes.",
       "cannot_connect": "Unable to retrieve valid train data. Please try again.",
       "no_services": "No additional passenger trains match this search. Try another start time or direction.",
-      "invalid_selection": "This selection is no longer available. Search again."
+      "invalid_selection": "This selection is no longer available. Search again.",
+      "select_station": "Choose at least one home station.",
+      "no_stations": "No supported UK stations are available with this token."
     },
-    "abort": {"integration_unavailable": "The integration is unavailable or reloading. Try again shortly."}
+    "abort": {
+      "integration_unavailable": "The integration is unavailable or reloading. Try again shortly."
+    }
   },
-  "selector": {"direction": {"options": {"departure": "Departure", "arrival": "Arrival"}}},
+  "selector": {
+    "direction": {
+      "options": {
+        "departure": "Departure",
+        "arrival": "Arrival"
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "status": {
         "name": "Status",
         "state": {
-          "scheduled": "Scheduled", "on_time": "On time", "delayed": "Delayed",
-          "early": "Early", "arrived": "Arrived", "departed": "Departed",
-          "cancelled": "Cancelled", "diverted": "Diverted",
-          "unconfirmed": "Unconfirmed", "no_report": "No report"
+          "scheduled": "Scheduled",
+          "on_time": "On time",
+          "delayed": "Delayed",
+          "early": "Early",
+          "arrived": "Arrived",
+          "departed": "Departed",
+          "cancelled": "Cancelled",
+          "diverted": "Diverted",
+          "unconfirmed": "Unconfirmed",
+          "no_report": "No report"
         }
       },
-      "delay_minutes": {"name": "Delay"},
-      "platform": {"name": "Platform"},
-      "scheduled": {"name": "Scheduled time"},
-      "expected": {"name": "Expected time"},
-      "actual": {"name": "Actual time"},
-      "last_success": {"name": "Last successful update"}
+      "delay_minutes": {
+        "name": "Delay"
+      },
+      "platform": {
+        "name": "Platform"
+      },
+      "platform_status": {
+        "name": "Platform status",
+        "state": {
+          "planned": "Planned",
+          "confirmed": "Confirmed",
+          "unconfirmed": "Unconfirmed",
+          "not_available": "Not available"
+        }
+      },
+      "scheduled": {
+        "name": "Scheduled time"
+      },
+      "expected": {
+        "name": "Expected time"
+      },
+      "actual": {
+        "name": "Actual time"
+      },
+      "last_success": {
+        "name": "Last successful update"
+      }
     },
-    "button": {"refresh": {"name": "Refresh tracked trains"}}
+    "button": {
+      "refresh": {
+        "name": "Refresh tracked trains"
+      }
+    }
   }
 }

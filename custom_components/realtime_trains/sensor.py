@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, NAME
+from .tracking import platform_status
 
 STATUSES = [
     "scheduled",
@@ -46,6 +47,13 @@ DESCRIPTIONS = (
     ),
     SensorEntityDescription(
         key="platform", translation_key="platform", icon="mdi:train"
+    ),
+    SensorEntityDescription(
+        key="platform_status",
+        translation_key="platform_status",
+        device_class=SensorDeviceClass.ENUM,
+        options=["planned", "confirmed", "unconfirmed", "not_available"],
+        icon="mdi:check-decagram-outline",
     ),
     *(
         SensorEntityDescription(
@@ -108,6 +116,8 @@ class TrainSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
+        if self.entity_description.key == "platform_status":
+            return platform_status(self._snapshot)
         value = self._snapshot.get(self.entity_description.key)
         if self.entity_description.device_class == SensorDeviceClass.TIMESTAMP:
             return datetime.fromisoformat(value) if value else None
@@ -125,6 +135,19 @@ class TrainSensor(CoordinatorEntity, SensorEntity):
             "stale": data.get("stale", True),
             "next_poll": data.get("next_poll"),
             "platform_source": data.get("platform_source"),
+            "platform_status": platform_status(data),
+            "planned_platform": data.get("planned_platform")
+            or (
+                data.get("platform")
+                if data.get("platform_source") == "planned"
+                else None
+            ),
+            "confirmed_platform": data.get("confirmed_platform")
+            or (
+                data.get("platform")
+                if data.get("platform_source") == "actual"
+                else None
+            ),
             "reason": data.get("reason"),
             "last_error": data.get("last_error"),
         }

@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from custom_components.realtime_trains.models import ServiceLocation
-from custom_components.realtime_trains.tracking import TrackedCall, evaluate
+from custom_components.realtime_trains.tracking import (
+    TrackedCall,
+    evaluate,
+    platform_status,
+)
 
 from .rtt_fixtures import DESTINATION, SERVICE_ID, location_call
 
@@ -79,6 +83,30 @@ def test_arrival_can_finish_while_departure_is_forecast():
     assert result["status"] == "arrived"
     assert result["terminal"]
     assert result["next_poll"] is None
+
+
+def test_platform_confirmation_does_not_depend_on_number_changing():
+    call = tracked_call()
+    timing = {"scheduleAdvertised": SCHEDULED}
+    result = None
+    for reported, state, number, planned, confirmed in (
+        ({"planned": "5"}, "planned", "5", "5", None),
+        ({"planned": "5", "actual": "5"}, "confirmed", "5", "5", "5"),
+        ({"planned": "5", "actual": "6"}, "confirmed", "6", "5", "6"),
+        ({"planned": "5"}, "planned", "5", "5", None),
+        (None, "not_available", None, None, None),
+    ):
+        result = check_call(
+            call,
+            location_call(departure=timing, platform=reported),
+            now=NOW,
+            previous=result,
+        )
+        assert platform_status(result) == state
+        assert result["platform"] == number
+        assert result["planned_platform"] == planned
+        assert result["confirmed_platform"] == confirmed
+        assert not result["terminal"]
 
 
 @pytest.mark.parametrize(

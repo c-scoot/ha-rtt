@@ -19,6 +19,7 @@ from custom_components.realtime_trains.tracking import TrackedCall
 
 from .rtt_fixtures import (
     CREDENTIAL_MARKER,
+    DESTINATION,
     INFO,
     STOPS,
     board_response,
@@ -63,10 +64,37 @@ def status_sensor(hass, direction):
         state
         for state in hass.states.async_all("sensor")
         if state.entity_id.endswith("_status")
+        and not state.entity_id.endswith("_platform_status")
         and state.attributes.get("direction") == direction
     ]
     assert len(candidates) == 1
     return candidates[0]
+
+
+def track_sensor(hass, entry, key, description):
+    from homeassistant.helpers import entity_registry as er
+
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_{key}_{description}"
+    )
+    assert entity_id is not None
+    return hass.states.get(entity_id)
+
+
+async def open_options(hass, entry, step):
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "menu"
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": step}
+    )
+
+
+async def refresh_tracks(hass, entry, monkeypatch):
+    coordinator = entry.runtime_data.coordinator
+    # Avoid waiting for Home Assistant's own request debounce timer.
+    monkeypatch.setattr(coordinator, "async_request_refresh", coordinator.async_refresh)
+    await coordinator.async_refresh_tracked()
+    await hass.async_block_till_done()
 
 
 async def test_config_flow_reports_invalid_auth(hass, session):
@@ -131,11 +159,7 @@ async def test_track_from_options_recover_from_timeout_and_restore(
         service_id, "gb-nr:CLJ", direction, scheduled.isoformat(), "train"
     ).key
 
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["type"] == "menu"
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"next_step_id": "add_track"}
-    )
+    result = await open_options(hass, entry, "add_track")
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
@@ -144,26 +168,25 @@ async def test_track_from_options_recover_from_timeout_and_restore(
         },
     )
     assert result["step_id"] == "choose_track"
+    (train_selector,) = result["data_schema"].schema.values()
+    (candidate,) = train_selector.config["options"]
+    assert "Platform 5 (planned)" in candidate["label"]
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {CONF_TRACK: key}
     )
     assert result["type"] == "create_entry"
     await hass.async_block_till_done()
     assert entry.options[CONF_TRACKS][0]["unique_identity"] == service_id
+    assert "Platform" not in entry.options[CONF_TRACKS][0]["label"]
 
     async def refresh():
-        coordinator = entry.runtime_data.coordinator
-        # Avoid waiting for Home Assistant's own request debounce timer.
-        monkeypatch.setattr(
-            coordinator, "async_request_refresh", coordinator.async_refresh
-        )
-        await coordinator.async_refresh_tracked()
-        await hass.async_block_till_done()
+        await refresh_tracks(hass, entry, monkeypatch)
 
     await refresh()
     state = status_sensor(hass, direction)
     assert state.state == "delayed"
     assert state.attributes["stale"] is False
+    assert track_sensor(hass, entry, key, "platform_status").state == "planned"
 
     await refresh()
     state = status_sensor(hass, direction)
@@ -179,6 +202,11 @@ async def test_track_from_options_recover_from_timeout_and_restore(
     await refresh()
     expected = "arrived" if direction == "arrival" else "departed"
     assert status_sensor(hass, direction).state == expected
+    assert track_sensor(hass, entry, key, "platform_status").state == "confirmed"
+    platform = track_sensor(hass, entry, key, "platform")
+    assert platform.state == "6"
+    assert platform.attributes["planned_platform"] == "5"
+    assert platform.attributes["confirmed_platform"] == "6"
     assert entry.runtime_data.coordinator.update_interval is None
 
     http_count = session.request.call_count
@@ -193,10 +221,7 @@ async def test_track_from_options_recover_from_timeout_and_restore(
     entity_id = status_sensor(hass, direction).entity_id
     registry = er.async_get(hass)
     assert registry.async_get(entity_id) is not None
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"next_step_id": "remove_track"}
-    )
+    result = await open_options(hass, entry, "remove_track")
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {CONF_TRACK: [key]}
     )
@@ -205,3 +230,196 @@ async def test_track_from_options_recover_from_timeout_and_restore(
     assert not entry.options[CONF_TRACKS]
     assert hass.states.get(entity_id) is None
     assert registry.async_get(entity_id) is None
+
+
+async def test_legacy_entry_adds_a_second_station_and_polls_one_shared_service(
+    hass, session
+):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.realtime_trains.const import CONF_STATION_NAME, CONF_STATIONS
+
+    clapham, waterloo = "gb-nr:CLJ", "gb-nr:WAT"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=DOMAIN,
+        data={
+            CONF_TOKEN: CREDENTIAL_MARKER,
+            CONF_STATION: clapham,
+            CONF_STATION_NAME: "Clapham Junction (CLJ)",
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    session.request.assert_not_called()
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    service_id = f"gb-nr:L01525:{now.date().isoformat()}"
+    start = now - timedelta(minutes=35)
+    departure = (now - timedelta(minutes=25)).isoformat()
+    arrival = (now - timedelta(minutes=10)).isoformat()
+    clapham_call = location_call(
+        departure={"scheduleAdvertised": departure, "realtimeActual": departure}
+    )
+    waterloo_call = location_call(
+        station=DESTINATION,
+        arrival={"scheduleAdvertised": arrival, "realtimeActual": arrival},
+    )
+    boards = {
+        clapham: board_response(clapham_call, service_ids=[service_id]),
+        waterloo: board_response(
+            waterloo_call, service_ids=[service_id], station=DESTINATION
+        ),
+    }
+    paths = []
+
+    def request(_method, url, **kwargs):
+        path = urlsplit(url).path
+        paths.append(path)
+        if path.endswith("/location"):
+            payload = boards[kwargs["params"]["code"]]
+        elif path.endswith("/service"):
+            assert kwargs["params"]["uniqueIdentity"] == service_id
+            payload = service_response(
+                clapham_call, waterloo_call, unique_identity=service_id
+            )
+        else:
+            assert path == "/data/stops"
+            payload = STOPS
+        return response(200, payload)[0]
+
+    session.request.side_effect = request
+    result = await open_options(hass, entry, "manage_stations")
+    assert result["step_id"] == "manage_stations"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_STATIONS: []}
+    )
+    assert result["errors"] == {CONF_STATIONS: "select_station"}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_STATIONS: [clapham, waterloo]}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert set(entry.options[CONF_STATIONS]) == {clapham, waterloo}
+    assert entry.data[CONF_STATION] == clapham
+    assert paths == ["/data/stops"]
+
+    coordinator = entry.runtime_data.coordinator
+    for _ in range(2):
+        (first,) = await coordinator.async_get_board(start, clapham)
+        (second,) = await coordinator.async_get_board(start, waterloo)
+        assert (
+            first.temporal_data.departure.schedule_advertised.isoformat() == departure
+        )
+        assert second.temporal_data.arrival.schedule_advertised.isoformat() == arrival
+    assert paths.count("/rtt/location") == 2
+    with pytest.raises(ValueError):
+        await coordinator.async_get_board(start, "gb-nr:WOK")
+    assert paths.count("/rtt/location") == 2
+
+    async def add_track(station, direction, scheduled):
+        result = await open_options(hass, entry, "add_track")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_DIRECTION: direction,
+                CONF_STATION: station,
+                CONF_WINDOW_START: start.isoformat(),
+            },
+        )
+        assert result["step_id"] == "choose_track"
+        key = TrackedCall(service_id, station, direction, scheduled, "train").key
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_TRACK: key}
+        )
+        assert result["type"] == "create_entry"
+        await hass.async_block_till_done()
+        return key
+
+    first_key = await add_track(clapham, "departure", departure)
+    first_entity_id = track_sensor(hass, entry, first_key, "status").entity_id
+    second_key = await add_track(waterloo, "arrival", arrival)
+    coordinator = entry.runtime_data.coordinator
+    coordinator.data[first_key]["next_poll"] = (now + timedelta(minutes=5)).isoformat()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert paths.count("/rtt/service") == 1
+    assert len(entry.runtime_data.budget.dump()["requests"]) == len(paths)
+    assert track_sensor(hass, entry, first_key, "status").state == "departed"
+    assert track_sensor(hass, entry, second_key, "status").state == "arrived"
+    assert track_sensor(hass, entry, first_key, "status").entity_id == first_entity_id
+
+    result = await open_options(hass, entry, "manage_stations")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_STATIONS: [waterloo]}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert set(entry.options[CONF_STATIONS]) == {waterloo}
+    assert track_sensor(hass, entry, first_key, "status").entity_id == first_entity_id
+    assert track_sensor(hass, entry, first_key, "status").state == "departed"
+    assert paths.count("/rtt/service") == 1
+
+
+async def test_legacy_terminal_platform_remains_confirmed_without_refetch(
+    hass, session
+):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.realtime_trains.const import CONF_STATION_NAME, CONF_STATIONS
+    from custom_components.realtime_trains.coordinator import entry_store
+
+    scheduled = "2026-11-20T16:45:00Z"
+    call = TrackedCall(
+        "gb-nr:L01525:2026-11-20", "gb-nr:CLJ", "departure", scheduled, "Train"
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_TOKEN: CREDENTIAL_MARKER,
+            CONF_STATION: call.station,
+            CONF_STATION_NAME: "Clapham Junction (CLJ)",
+        },
+        options={CONF_TRACKS: [call.to_dict()]},
+    )
+    entry.add_to_hass(hass)
+    await entry_store(hass, entry).async_save(
+        {
+            "tracks": {
+                call.key: {
+                    "status": "departed",
+                    "terminal": True,
+                    "scheduled": scheduled,
+                    "platform": "5",
+                    "platform_source": "actual",
+                    "next_poll": None,
+                }
+            }
+        }
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    platform = track_sensor(hass, entry, call.key, "platform")
+    assert platform.state == "5"
+    assert platform.attributes["confirmed_platform"] == "5"
+    assert platform.attributes["planned_platform"] is None
+    assert track_sensor(hass, entry, call.key, "platform_status").state == "confirmed"
+    session.request.assert_not_called()
+
+    session.request.return_value = response(200, STOPS)[0]
+    result = await open_options(hass, entry, "manage_stations")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_STATIONS: [call.station, "gb-nr:WAT"]}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    restored = track_sensor(hass, entry, call.key, "platform")
+    assert restored.entity_id == platform.entity_id
+    assert restored.state == "5"
+    assert track_sensor(hass, entry, call.key, "platform_status").state == "confirmed"
+    assert [urlsplit(args.args[1]).path for args in session.request.call_args_list] == [
+        "/data/stops"
+    ]

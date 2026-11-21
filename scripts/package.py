@@ -18,7 +18,10 @@ def main() -> None:
         for path in INTEGRATION.rglob("*")
         if path.is_file() and path.suffix in allowed and "__pycache__" not in path.parts
     )
-    files += [ROOT / name for name in ("LICENSE", "NOTICE.md", "README.md", "hacs.json")]
+    files += [
+        ROOT / name
+        for name in ("LICENSE", "NOTICE.md", "README.md", "CHANGELOG.md", "hacs.json")
+    ]
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
         for path in files:
             archive.write(path, path.relative_to(ROOT).as_posix())

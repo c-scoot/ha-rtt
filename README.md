@@ -1,15 +1,17 @@
 # Realtime Trains for Home Assistant
 
-Track selected, dated train arrivals or departures at your home station using
+Track selected, dated train arrivals or departures at your home stations using
 the Realtime Trains next-generation API. Designed for installation through HACS.
 
 ## Features
 
 - UI setup with your own RTT access or refresh token and a searchable home station.
+- Add two or more home stations under one integration and one shared API budget.
 - Pick one-off arrivals or departures by date, time, origin and destination.
 - Monitor several selected trains independently through their event at home.
 - Status, signed delay in minutes, platform, scheduled/expected/actual time and
   last successful update as Home Assistant entities.
+- A separate Platform status sensor distinguishes planned from confirmed platforms.
 - Five-minute polling outside the final 30 minutes; one-minute polling inside
   the final 30 minutes, including overdue trains. This applies to the selected
   arrival or departure, using the earlier of scheduled and expected times so
@@ -37,8 +39,10 @@ Home Assistant configuration's `custom_components` directory and restart.
 
 1. Open **Settings → Devices & services → Add integration → Realtime Trains**.
 2. Enter your token, then choose your home station.
-3. Open the integration's **Configure** menu and choose **Add train**.
-4. Choose arrivals or departures and a UK local date/time. The picker lists
+3. To add another home station, choose **Configure → Manage home stations**
+   and select all stations you want. Keep using this single integration.
+4. Choose **Configure → Add train**, then a home station, arrivals or departures,
+   and a UK local date/time. The picker lists
    advertised passenger calls within the following hour. Change the start
    time to search another hour; the dated service identity is retained even
    when a journey began on the previous day.
@@ -49,9 +53,11 @@ ultimate destination. For a train that visits the same station twice, the
 scheduled event time distinguishes the selected call. A separate arrival and
 departure for the same service can both be selected.
 
-Use **Remove train** in Configure to remove a selection. Changing the home
-station currently requires removing this integration and setting it up again.
-Only one home-station configuration is supported. The refresh button
+Use **Manage home stations** to add or remove stations from the train picker.
+At least one must remain selected. Removing a station keeps its already
+tracked trains and results; use **Remove train** to remove those separately.
+Existing single-station installations work immediately after updating, with
+their selections, entity IDs and final results preserved. The refresh button
 updates active selections and respects the same shared budget.
 
 ## Status and freshness
@@ -64,8 +70,18 @@ service lookup or report never proves arrival, departure or cancellation.
 Missing reports show `no_report`. A track that cannot be confirmed within
 24 hours of its scheduled event expires as `unconfirmed`; a later predicted
 event extends that deadline so it can be checked. Final results stay visible.
-The platform sensor indicates `platform_source: actual` or `planned`; a
-planned fallback is not a confirmed platform assignment.
+The **Platform** sensor keeps the platform number. **Platform status** shows
+**Planned** until RTT supplies an actual platform, then **Confirmed**, even
+if the number stays the same. A platform number alone never confirms it.
+**Not available** means RTT supplies neither number; **Unconfirmed** means a
+retained value has no certainty information. The train picker also labels
+platforms as planned or confirmed.
+
+Platform attributes expose `planned_platform`, `confirmed_platform`, and
+the original `platform_source: actual` or `planned` for compatibility.
+When a train changes from planned platform 5 to confirmed platform 6, both
+values remain inspectable. An actual platform means RTT's reported platform;
+it is independent of whether the train has arrived or departed.
 
 Retained readings carry `stale`, `last_error` and `next_poll` attributes. During
 an outage or budget deferral, check freshness before using a reading in an
@@ -80,6 +96,13 @@ When a limit is reached, active selections remain saved and resume when quota
 allows. Several trains can therefore refresh less often than once a minute.
 No board is polled continuously when there are no active trains; station
 lists are cached and board searches have a short cache.
+
+Adding home stations does not start additional background requests. Each
+station-board search is cached separately. A service response includes all
+of that train's calls: when the same train is due for refresh at two stations,
+one service request updates both. Different trains still need separate
+requests and all share the same allowance. There is no reason to add the
+integration twice just to monitor two home stations.
 
 For scale: two independently polled trains at one request/minute need 120
 requests/hour, exceeding the 100/hour allowance before setup or search calls.

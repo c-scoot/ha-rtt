@@ -34,6 +34,12 @@ STOPS = {
             "shortCode": "CLJ",
             "description": "Clapham Junction",
         },
+        {
+            "namespace": "gb-nr",
+            "uniqueIdentity": "gb-nr:WAT",
+            "shortCode": "WAT",
+            "description": "London Waterloo",
+        },
     ],
 }
 SERVICE_ID = "gb-nr:L01525:2026-11-20"
@@ -92,7 +98,7 @@ def service_response(*locations, unique_identity=SERVICE_ID):
     }
 
 
-def board_response(*locations, service_ids=None):
+def board_response(*locations, service_ids=None, station=STATION):
     """Build a line-up where geography sits in the top-level query."""
     if service_ids is None:
         service_ids = [SERVICE_ID] * len(locations)
@@ -109,6 +115,6 @@ def board_response(*locations, service_ids=None):
         )
     return {
         "systemStatus": SYSTEM_STATUS,
-        "query": {"location": STATION},
+        "query": {"location": station},
         "services": services,
     }

@@ -1,7 +1,8 @@
-"""Set up a home station and choose individual service calls to track."""
+"""Set up home stations and choose individual service calls to track."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,6 +30,7 @@ from .const import (
     CONF_IS_REFRESH_TOKEN,
     CONF_STATION,
     CONF_STATION_NAME,
+    CONF_STATIONS,
     CONF_TOKEN,
     CONF_TRACK,
     CONF_TRACKS,
@@ -37,8 +39,9 @@ from .const import (
     NAME,
     UK_TIME_ZONE,
 )
-from .coordinator import Board, BudgetLedger, read_tracks
+from .coordinator import Board, BudgetLedger, read_stations, read_tracks
 from .models import LocationCallType, ModeType
+from .stations import station_labels
 from .tracking import TrackedCall
 
 
@@ -88,7 +91,7 @@ class RealtimeTrainsConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlowWithReload:
-        """Return the flow for adding and removing trackers."""
+        """Return the flow for managing home stations and trackers."""
         return RealtimeTrainsOptionsFlow()
 
     async def async_step_user(
@@ -117,15 +120,7 @@ class RealtimeTrainsConfigFlow(ConfigFlow, domain=DOMAIN):
                 except (RttError, BudgetDeferred, ValueError) as err:
                     errors["base"] = _flow_error(err)
                 else:
-                    self._stations = {
-                        stop.unique_identity or f"gb-nr:{stop.short_code}": (
-                            f"{stop.description} ({stop.short_code})"
-                            if stop.description
-                            else stop.short_code
-                        )
-                        for stop in stops
-                        if stop.namespace == "gb-nr" and stop.short_code
-                    }
+                    self._stations = station_labels(stops)
                     if self._stations:
                         self._credential_data = {
                             CONF_TOKEN: token,
@@ -155,12 +150,11 @@ class RealtimeTrainsConfigFlow(ConfigFlow, domain=DOMAIN):
                     },
                 )
             errors[CONF_STATION] = "invalid_selection"
-        stations = dict(
-            sorted(self._stations.items(), key=lambda option: option[1].casefold())
-        )
         return self.async_show_form(
             step_id="station",
-            data_schema=vol.Schema({vol.Required(CONF_STATION): _dropdown(stations)}),
+            data_schema=vol.Schema(
+                {vol.Required(CONF_STATION): _dropdown(self._stations)}
+            ),
             errors=errors,
         )
 
@@ -218,9 +212,15 @@ def _start_time(value: str) -> datetime:
     return stamp
 
 
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    track: TrackedCall
+    picker_label: str
+
+
 def _candidate_calls(
-    board: Board, station: str, direction: str
-) -> dict[str, TrackedCall]:
+    board: Board, station: str, direction: str, station_name: str
+) -> dict[str, _Candidate]:
     excluded_call_type = (
         LocationCallType.ADVERTISED_SET_DOWN
         if direction == "departure"
@@ -254,23 +254,31 @@ def _candidate_calls(
         )
         date_label = scheduled.astimezone(UK_TIME_ZONE).strftime("%d %b %Y %H:%M %Z")
         platform = row.location_metadata.platform if row.location_metadata else None
-        platform_value = (platform.actual or platform.planned) if platform else None
-        label_parts = [date_label, route, metadata.identity or metadata.unique_identity]
-        if platform_value:
-            label_parts.append(platform_value)
+        label_parts = [
+            station_name,
+            date_label,
+            route,
+            metadata.identity or metadata.unique_identity,
+        ]
         label = " · ".join(filter(None, label_parts))
-        calls.append(
-            TrackedCall(
-                metadata.unique_identity,
-                station,
-                direction,
-                scheduled.isoformat(),
-                label,
-            )
+        track = TrackedCall(
+            metadata.unique_identity,
+            station,
+            direction,
+            scheduled.isoformat(),
+            label,
         )
+        picker_label = label
+        if platform and platform.actual:
+            picker_label += f" · Platform {platform.actual} (confirmed)"
+        if platform and platform.planned and platform.planned != platform.actual:
+            picker_label += f" · Platform {platform.planned} (planned)"
+        calls.append(_Candidate(track, picker_label))
     return {
-        call.key: call
-        for call in sorted(calls, key=lambda call: (call.scheduled, call.label))
+        candidate.track.key: candidate
+        for candidate in sorted(
+            calls, key=lambda item: (item.track.scheduled, item.track.label)
+        )
     }
 
 
@@ -278,16 +286,69 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
     """Manage persistent dated trackers without requiring a custom dashboard."""
 
     def __init__(self) -> None:
-        self._candidates: dict[str, TrackedCall] = {}
+        self._candidates: dict[str, _Candidate] = {}
+        self._station_directory: dict[str, str] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Offer add and remove operations."""
-        menu_options = ["add_track"]
+        """Offer station management and adding or removing train trackers."""
+        menu_options = ["add_track", "manage_stations"]
         if read_tracks(self.config_entry):
             menu_options.append("remove_track")
         return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_manage_stations(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the stations available in the train picker."""
+        errors: dict[str, str] = {}
+        current = read_stations(self.config_entry)
+        if self._station_directory is None:
+            runtime = getattr(self.config_entry, "runtime_data", None)
+            if runtime is None:
+                return self.async_abort(reason="integration_unavailable")
+            try:
+                directory = await runtime.coordinator.async_get_stations()
+            except RttAuthError:
+                self.config_entry.async_start_reauth(self.hass)
+                errors["base"] = "invalid_auth"
+            except (RttError, BudgetDeferred, ValueError) as err:
+                errors["base"] = _flow_error(err)
+            else:
+                if directory:
+                    self._station_directory = directory
+                else:
+                    errors["base"] = "no_stations"
+
+        schema: dict[Any, Any] = {}
+        if self._station_directory is not None:
+            choices = {**current, **self._station_directory}
+            if user_input is not None and CONF_STATIONS in user_input:
+                selected = user_input[CONF_STATIONS]
+                if not selected:
+                    errors[CONF_STATIONS] = "select_station"
+                elif any(station not in choices for station in selected):
+                    errors[CONF_STATIONS] = "invalid_selection"
+                else:
+                    return self.async_create_entry(
+                        title="",
+                        data={
+                            **self.config_entry.options,
+                            CONF_STATIONS: {
+                                station: choices[station] for station in selected
+                            },
+                        },
+                    )
+            schema[vol.Required(CONF_STATIONS, default=list(current))] = _dropdown(
+                choices,
+                multiple=True,
+            )
+        return self.async_show_form(
+            step_id="manage_stations",
+            data_schema=vol.Schema(schema),
+            errors=errors,
+        )
 
     async def async_step_add_track(
         self, user_input: dict[str, Any] | None = None
@@ -304,9 +365,16 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
             .isoformat(sep=" ")
         )
         direction = "departure"
+        stations = read_stations(self.config_entry)
+        station = next(iter(stations))
         if user_input is not None:
             direction = user_input[CONF_DIRECTION]
             now = user_input[CONF_WINDOW_START]
+            station = user_input.get(CONF_STATION, station)
+            if station not in stations:
+                errors[CONF_STATION] = "invalid_selection"
+                station = next(iter(stations))
+        if user_input is not None and not errors:
             runtime = getattr(self.config_entry, "runtime_data", None)
             if runtime is None:
                 return self.async_abort(reason="integration_unavailable")
@@ -316,7 +384,7 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
                 errors[CONF_WINDOW_START] = "invalid_window"
             else:
                 try:
-                    board = await runtime.coordinator.async_get_board(start)
+                    board = await runtime.coordinator.async_get_board(start, station)
                 except RttAuthError:
                     self.config_entry.async_start_reauth(self.hass)
                     errors["base"] = "invalid_auth"
@@ -325,39 +393,39 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
                 except (RttError, BudgetDeferred, ValueError) as err:
                     errors["base"] = _flow_error(err)
                 else:
-                    station = self.config_entry.data[CONF_STATION]
                     tracks = read_tracks(self.config_entry)
                     self._candidates = {
-                        key: call
-                        for key, call in _candidate_calls(
-                            board, station, direction
+                        key: candidate
+                        for key, candidate in _candidate_calls(
+                            board, station, direction, stations[station]
                         ).items()
                         if key not in tracks
                     }
                     if self._candidates:
                         return await self.async_step_choose_track()
                     errors["base"] = "no_services"
+        schema: dict[Any, Any] = {}
+        if len(stations) > 1:
+            schema[vol.Optional(CONF_STATION, default=station)] = _dropdown(stations)
+        schema.update(
+            {
+                vol.Required(
+                    CONF_DIRECTION, default=direction
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=["departure", "arrival"], translation_key="direction"
+                    ),
+                ),
+                vol.Required(
+                    CONF_WINDOW_START, default=now
+                ): selector.DateTimeSelector(),
+            }
+        )
         return self.async_show_form(
             step_id="add_track",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_DIRECTION, default=direction
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=["departure", "arrival"],
-                            translation_key="direction",
-                        ),
-                    ),
-                    vol.Required(
-                        CONF_WINDOW_START, default=now
-                    ): selector.DateTimeSelector(),
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors,
-            description_placeholders={
-                "station": self.config_entry.data[CONF_STATION_NAME]
-            },
+            description_placeholders={"station": stations[station]},
         )
 
     async def async_step_choose_track(
@@ -367,10 +435,14 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
         errors = {}
         if user_input is not None:
             key = user_input[CONF_TRACK]
-            track = self._candidates.get(key)
+            candidate = self._candidates.get(key)
             tracks = read_tracks(self.config_entry)
-            if track and key not in tracks:
-                tracks[key] = track
+            if (
+                candidate
+                and key not in tracks
+                and candidate.track.station in read_stations(self.config_entry)
+            ):
+                tracks[key] = candidate.track
                 return self._save_tracks(tracks)
             errors[CONF_TRACK] = "invalid_selection"
         return self.async_show_form(
@@ -378,7 +450,10 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_TRACK): _dropdown(
-                        {key: track.label for key, track in self._candidates.items()}
+                        {
+                            key: candidate.picker_label
+                            for key, candidate in self._candidates.items()
+                        }
                     )
                 }
             ),

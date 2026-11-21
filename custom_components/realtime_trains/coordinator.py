@@ -26,11 +26,14 @@ from .const import (
     BOARD_CACHE_TTL,
     CONF_IS_REFRESH_TOKEN,
     CONF_STATION,
+    CONF_STATION_NAME,
+    CONF_STATIONS,
     CONF_TOKEN,
     CONF_TRACKS,
     DOMAIN,
     ERROR_RETRY_INTERVAL,
     NAME,
+    STATIONS_CACHE_TTL,
     STORE_VERSION,
 )
 from .models import (
@@ -39,6 +42,7 @@ from .models import (
     NetworkRailServiceDetail,
     ServiceDetail,
 )
+from .stations import station_labels
 from .tracking import TrackedCall, evaluate
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,6 +80,14 @@ def read_tracks(entry: ConfigEntry) -> dict[str, TrackedCall]:
     return {track.key: track for track in tracks}
 
 
+def read_stations(entry: ConfigEntry) -> dict[str, str]:
+    """Read configured stations, including entries created with one home station."""
+    if stations := entry.options.get(CONF_STATIONS):
+        return dict(stations)
+    station = entry.data[CONF_STATION]
+    return {station: entry.data.get(CONF_STATION_NAME, station)}
+
+
 class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
     """Refresh due services and fetch station boards only when requested."""
 
@@ -88,7 +100,7 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
         ledger: BudgetLedger,
     ) -> None:
         super().__init__(hass, _LOGGER, name=NAME, config_entry=entry)
-        self.station: str = entry.data[CONF_STATION]
+        self.stations = read_stations(entry)
         self.tracks = read_tracks(entry)
         self.ledger = ledger
         self.budget = ledger.budget
@@ -99,7 +111,8 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
         self._board_lock = Lock()
         self._closed = False
         self._force_refresh = False
-        self._board_cache: tuple[datetime, datetime, Board] | None = None
+        self._board_cache: dict[tuple[str, datetime], tuple[datetime, Board]] = {}
+        self._stations_cache: tuple[datetime, dict[str, str]] | None = None
         self.api = RealtimeTrainsApi(
             async_get_clientsession(hass),
             entry.data[CONF_TOKEN],
@@ -133,24 +146,51 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
                 await self._store.async_save(payload)
                 self._saved = payload
 
-    async def async_get_board(self, start: datetime) -> Board:
+    async def async_get_board(
+        self, start: datetime, station: str | None = None
+    ) -> Board:
         """Return the station line-up from the cache or a new request."""
+        if station is None:
+            station = next(iter(self.stations))
+        if station not in self.stations:
+            raise ValueError("Station is not configured")
         async with self._board_lock:
             if self._closed:
                 raise RttError("The integration is reloading")
-            if self._board_cache is not None:
-                cached_start, expires, services = self._board_cache
-                if start == cached_start and datetime.now(UTC) < expires:
-                    return services
+            now = datetime.now(UTC)
+            key = (station, start)
+            self._board_cache = {
+                cached_key: (expires, services)
+                for cached_key, (expires, services) in self._board_cache.items()
+                if now < expires
+            }
+            if cached := self._board_cache.get(key):
+                return cached[1]
             board = await self.api.async_get_location(
-                self.station, time_from=start, time_window=60
+                station, time_from=start, time_window=60
             )
-            self._board_cache = (
-                start,
+            self._board_cache[key] = (
                 datetime.now(UTC) + BOARD_CACHE_TTL,
                 board.services,
             )
             return board.services
+
+    async def async_get_stations(self) -> dict[str, str]:
+        """Fetch the passenger station directory when the options flow needs it."""
+        async with self._board_lock:
+            if self._closed:
+                raise RttError("The integration is reloading")
+            if self._stations_cache is not None:
+                expires, stations = self._stations_cache
+                if datetime.now(UTC) < expires:
+                    return dict(stations)
+            stations = station_labels(await self.api.async_get_stops())
+            if stations:
+                self._stations_cache = (
+                    datetime.now(UTC) + STATIONS_CACHE_TTL,
+                    stations,
+                )
+            return dict(stations)
 
     async def async_refresh_tracked(self) -> None:
         """Request an early refresh of active trackers through the shared budget."""
@@ -181,9 +221,26 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
             force = self._force_refresh
             self._force_refresh = False
             snapshots = dict(self.data)
-            services: dict[str, ServiceDetail | NetworkRailServiceDetail | None] = {}
+            services: dict[
+                str,
+                tuple[
+                    datetime,
+                    ServiceDetail | NetworkRailServiceDetail | None | Exception,
+                ],
+            ] = {}
             deferred_until: datetime | None = None
-            near_cutoff = datetime.now(UTC) + timedelta(minutes=30)
+            cycle_start = datetime.now(UTC)
+            near_cutoff = cycle_start + timedelta(minutes=30)
+            due_services = {
+                self.tracks[key].unique_identity
+                for key, snapshot in snapshots.items()
+                if not snapshot["terminal"]
+                and (
+                    force
+                    or not snapshot.get("next_poll")
+                    or datetime.fromisoformat(snapshot["next_poll"]) <= cycle_start
+                )
+            }
 
             def priority(key: str) -> tuple[bool, str]:
                 snapshot = snapshots[key]
@@ -199,26 +256,24 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
                     break
                 track = self.tracks[key]
                 previous = snapshots[key]
-                if previous["terminal"]:
+                identity = track.unique_identity
+                if previous["terminal"] or identity not in due_services:
                     continue
                 now = datetime.now(UTC)
-                next_poll = previous.get("next_poll")
-                if not force and next_poll and datetime.fromisoformat(next_poll) > now:
-                    continue
                 try:
-                    if track.unique_identity not in services:
+                    if identity not in services:
                         if deferred_until is not None:
                             raise BudgetDeferred(deferred_until)
                         try:
-                            services[
-                                track.unique_identity
-                            ] = await self.api.async_get_service(
-                                track.unique_identity,
-                            )
+                            detail = await self.api.async_get_service(identity)
                         except RttNotFoundError:
-                            services[track.unique_identity] = None
-                    detail = services[track.unique_identity]
-                    received_at = datetime.now(UTC)
+                            detail = None
+                        except (RttError, BudgetDeferred, ValueError) as err:
+                            detail = err
+                        services[identity] = (datetime.now(UTC), detail)
+                    received_at, detail = services[identity]
+                    if isinstance(detail, Exception):
+                        raise detail
                     snapshot = evaluate(
                         track,
                         detail.locations if detail else (),
@@ -239,7 +294,7 @@ class RealtimeTrainsCoordinator(DataUpdateCoordinator[TrackData]):
                             if detail
                             else "service_not_found",
                         )
-                    snapshot["last_attempt"] = now.isoformat()
+                    snapshot["last_attempt"] = received_at.isoformat()
                 except BudgetDeferred as err:
                     deferred_until = err.next_attempt
                     snapshot = self._deferred_snapshot(

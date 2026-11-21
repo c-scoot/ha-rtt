@@ -1,6 +1,6 @@
-# Validation — 20 November 2026
+# Validation — 21 November 2026 (0.2.0)
 
-- 39 tests passed against the Home Assistant 2025.8.0 fixture on Python 3.13.
+- 42 tests passed against the Home Assistant 2025.8.0 fixture on Python 3.13.
 - Ruff checks and Python compilation passed.
 - The install ZIP was built from an explicit file allowlist and its CRCs checked.
 - No live RTT requests, live Home Assistant changes or HACS install were made.
@@ -9,6 +9,10 @@ Coverage includes config and options flows, both station-event directions,
 terminal retention and reload, stale recovery, registry cleanup, midnight/DST,
 the 30-minute polling boundary, shared rolling quotas and persisted budgets,
 authentication requests, aiohttp retries, redirects and malformed responses.
+The 0.2.0 regressions also verify planned-to-confirmed platform transitions
+without a number change, platform withdrawal, multi-station options and cache
+isolation, sharing one response across staggered calls of the same train, and
+preservation of existing entity IDs and terminal results after station changes.
 
 ## Reproduce on Linux
 
