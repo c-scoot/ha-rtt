@@ -17,7 +17,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, NAME
+from .const import DOMAIN, NAME, UK_TIME_ZONE
 from .tracking import platform_status
 
 STATUSES = [
@@ -54,6 +54,27 @@ DESCRIPTIONS = (
         device_class=SensorDeviceClass.ENUM,
         options=["planned", "confirmed", "unconfirmed", "not_available"],
         icon="mdi:check-decagram-outline",
+    ),
+    SensorEntityDescription(
+        key="weekly_state",
+        translation_key="weekly_state",
+        device_class=SensorDeviceClass.ENUM,
+        options=[
+            "off",
+            "tracking",
+            "waiting",
+            "no_match",
+            "rate_limited",
+            "request_failed",
+            "invalid_auth",
+            "missing_match",
+        ],
+        icon="mdi:calendar-refresh",
+    ),
+    SensorEntityDescription(
+        key="weekly_next_scheduled",
+        translation_key="weekly_next_scheduled",
+        device_class=SensorDeviceClass.TIMESTAMP,
     ),
     *(
         SensorEntityDescription(
@@ -96,9 +117,16 @@ class TrainSensor(CoordinatorEntity, SensorEntity):
         self._track_id = track_id
         self._attr_unique_id = f"{entry.entry_id}_{track_id}_{description.key}"
         call = coordinator.tracks[track_id]
+        device_name = call.label
+        if call.repeat_weekly:
+            local_time = datetime.fromisoformat(call.scheduled).astimezone(UK_TIME_ZONE)
+            station = coordinator.stations.get(call.station, call.station)
+            device_name = (
+                f"Weekly · {station} · {local_time:%a %H:%M} · {call.direction}"
+            )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_{track_id}")},
-            name=call.label,
+            name=device_name,
             manufacturer=NAME,
             model=f"{call.direction.title()} tracker",
             entry_type="service",
@@ -118,6 +146,11 @@ class TrainSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         if self.entity_description.key == "platform_status":
             return platform_status(self._snapshot)
+        if self.entity_description.key == "weekly_state":
+            call = self.coordinator.tracks[self._track_id]
+            return self._snapshot.get("weekly_state") or (
+                "tracking" if call.repeat_weekly else "off"
+            )
         value = self._snapshot.get(self.entity_description.key)
         if self.entity_description.device_class == SensorDeviceClass.TIMESTAMP:
             return datetime.fromisoformat(value) if value else None
@@ -131,6 +164,10 @@ class TrainSensor(CoordinatorEntity, SensorEntity):
             "service_identity": call.unique_identity,
             "station": call.station,
             "direction": call.direction,
+            "repeat_weekly": call.repeat_weekly,
+            "weekly_state": data.get("weekly_state"),
+            "weekly_next_scheduled": data.get("weekly_next_scheduled"),
+            "weekly_next_check": data.get("weekly_next_check"),
             "terminal": data.get("terminal", False),
             "stale": data.get("stale", True),
             "next_poll": data.get("next_poll"),

@@ -79,6 +79,7 @@ def schedule_metadata(unique_identity=SERVICE_ID):
         "identity": identity,
         "departureDate": departure_date,
         "trainReportingIdentity": "2L40",
+        "operator": {"code": "SW", "name": "South Western Railway"},
         "modeType": "TRAIN",
         "inPassengerService": True,
     }

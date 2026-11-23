@@ -19,6 +19,7 @@ CONF_TRACKS = "tracks"
 CONF_DIRECTION = "direction"
 CONF_WINDOW_START = "window_start"
 CONF_TRACK = "track"
+CONF_REPEAT_WEEKLY = "repeat_weekly"
 
 BOARD_CACHE_TTL = timedelta(seconds=60)
 STATIONS_CACHE_TTL = timedelta(days=1)

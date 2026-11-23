@@ -8,6 +8,7 @@ the Realtime Trains next-generation API. Designed for installation through HACS.
 - UI setup with your own RTT access or refresh token and a searchable home station.
 - Add two or more home stations under one integration and one shared API budget.
 - Pick one-off arrivals or departures by date, time, origin and destination.
+- Optionally repeat selected trains every week at their UK local scheduled time.
 - Monitor several selected trains independently through their event at home.
 - Status, signed delay in minutes, platform, scheduled/expected/actual time and
   last successful update as Home Assistant entities.
@@ -46,7 +47,8 @@ Home Assistant configuration's `custom_components` directory and restart.
    advertised passenger calls within the following hour. Change the start
    time to search another hour; the dated service identity is retained even
    when a journey began on the previous day.
-5. Choose a service. Repeat to track more trains.
+5. Choose a service. Enable **Repeat weekly after completion** if wanted.
+   Repeat to track more trains.
 
 Tracking ends at that train's chosen arrival/departure **at home**, not its
 ultimate destination. For a train that visits the same station twice, the
@@ -59,6 +61,43 @@ tracked trains and results; use **Remove train** to remove those separately.
 Existing single-station installations work immediately after updating, with
 their selections, entity IDs and final results preserved. The refresh button
 updates active selections and respects the same shared budget.
+
+## Weekly repeating trains
+
+Enable **Repeat weekly after completion** when selecting a train, or open
+**Configure → Weekly repeats** to enable it for an existing selection.
+The same sensor and device IDs are retained across weeks. Existing one-off
+selections stay one-off until you enable the option.
+
+After the selected arrival/departure, the final result stays visible while
+the integration waits for the following week's train. Cancellations,
+diversions and unconfirmed expired trips also advance the weekly rule so a
+disruption does not stop it indefinitely. **Weekly repeat** shows the lookup
+state and **Next weekly train** shows the next scheduled occurrence.
+
+The rule retains the station, arrival/departure choice, UK local weekday and
+scheduled time, operator, origin and destination. Next week's timetable is
+queried within the final 24 hours; the API's actual dated service identity is
+used, rather than guessing a new ID. One uniquely matching service is required.
+If its time, operator or route changes, or several trains match, no train is
+selected automatically. The integration retries every six hours within that
+window, subject to quota. After one hour past the expected event it skips
+that occurrence and tries the following week. Select a new train if you want
+to follow a changed timetable.
+
+There are no train polls during the days spent waiting for next week. Once
+resolved, the normal five-minute/one-minute polling applies. All lookups use
+the same persisted request budget. Restarts retain the active dated trip and
+weekly rule; missed weeks are skipped without replaying every past lookup.
+
+Clock changes preserve UK local time. A weekly time that does not exist at
+the spring clock change is skipped; a repeated autumn time uses its earlier
+occurrence. Platform and actual-time values reset for each new dated trip.
+
+To stop repeating, deselect the train under **Weekly repeats**. Its current
+dated trip remains tracked. Use **Remove train** to remove the tracker entirely.
+Enabling repeats on an older saved selection may need a single service lookup
+to verify its route; if RTT can no longer supply it, select a current train.
 
 ## Status and freshness
 

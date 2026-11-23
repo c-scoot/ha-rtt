@@ -41,6 +41,7 @@
         "menu_options": {
           "add_track": "Add train",
           "remove_track": "Remove train",
+          "weekly_repeats": "Weekly repeats",
           "manage_stations": "Manage home stations"
         }
       },
@@ -62,10 +63,16 @@
       },
       "choose_track": {
         "title": "Choose a train to monitor",
-        "description": "Tracking ends when the selected arrival or departure is reported at home. Final results remain until removed.",
+        "description": "Monitor this dated train at home. Optionally repeat it each week at the same UK local scheduled time. Timetable changes without a clear match need a new selection.",
         "data": {
-          "track": "Train"
+          "track": "Train",
+          "repeat_weekly": "Repeat weekly after completion"
         }
+      },
+      "weekly_repeats": {
+        "title": "Weekly repeats",
+        "description": "Selected trains repeat every week after arrival, departure or cancellation. Clear a selection to stop repeating and keep monitoring its current dated train. Existing trains may need one API lookup to verify their route.",
+        "data": {"track": "Trains to repeat weekly"}
       },
       "remove_track": {
         "title": "Remove tracked trains",
@@ -82,7 +89,8 @@
       "no_services": "No additional passenger trains match this search. Try another start time or direction.",
       "invalid_selection": "This selection is no longer available. Search again.",
       "select_station": "Choose at least one home station.",
-      "no_stations": "No supported UK stations are available with this token."
+      "no_stations": "No supported UK stations are available with this token.",
+      "cannot_repeat": "The train's operator and route could not be verified. Select a current service with complete route data before enabling a weekly repeat."
     },
     "abort": {
       "integration_unavailable": "The integration is unavailable or reloading. Try again shortly."
@@ -128,6 +136,16 @@
           "not_available": "Not available"
         }
       },
+      "weekly_state": {
+        "name": "Weekly repeat",
+        "state": {
+          "off": "Off", "tracking": "Monitoring train",
+          "waiting": "Waiting for next week", "no_match": "No unique matching train",
+          "rate_limited": "Waiting for API allowance", "request_failed": "Lookup failed",
+          "invalid_auth": "API token needs attention", "missing_match": "Route verification needed"
+        }
+      },
+      "weekly_next_scheduled": {"name": "Next weekly train"},
       "scheduled": {
         "name": "Scheduled time"
       },

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Added optional weekly repeats for new or existing tracked trains.
+- Kept stable sensor/device IDs while resolving a genuine dated timetable
+  service each week using UK local time, route and operator.
+- Added Weekly repeat and Next weekly train sensors and controls for stopping
+  repeats while retaining the current dated trip.
+- Preserved completed results while waiting, with shared quota handling,
+  restart recovery and conservative handling of missing or ambiguous services.
+- Weekly rules continue after cancellations and skip missed weeks after outages.
+
 ## 0.2.0
 
 - Added a Platform status sensor: Planned, Confirmed, Unconfirmed or Not available.

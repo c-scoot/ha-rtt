@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypedDict
 
 from .models import (
     GeographicLocation,
@@ -32,6 +32,14 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+class RouteFingerprint(TypedDict):
+    """Timetable attributes that must agree before a weekly train can be selected."""
+
+    operator: str
+    origin: list[str]
+    destination: list[str]
+
+
 @dataclass(frozen=True, slots=True)
 class TrackedCall:
     """The selection survives relabelling, midnight and Home Assistant restarts."""
@@ -41,6 +49,9 @@ class TrackedCall:
     direction: str
     scheduled: str
     label: str
+    repeat_weekly: bool = False
+    tracking_id: str | None = None
+    recurrence_match: RouteFingerprint | None = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
         if self.direction not in {"arrival", "departure"}:
@@ -51,6 +62,8 @@ class TrackedCall:
     @property
     def key(self) -> str:
         """Stable Home Assistant identity, independent of the human-facing label."""
+        if self.tracking_id:
+            return self.tracking_id
         namespace, _, code = self.station.upper().rpartition(":")
         identity = (
             self.unique_identity,
@@ -63,12 +76,12 @@ class TrackedCall:
             json.dumps(identity, separators=(",", ":")).encode()
         ).hexdigest()
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible configuration."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, str]) -> TrackedCall:
+    def from_dict(cls, data: Mapping[str, Any]) -> TrackedCall:
         """Read the selected fields from storage or config entry data."""
         return cls(
             unique_identity=data["unique_identity"],
@@ -76,6 +89,9 @@ class TrackedCall:
             direction=data["direction"],
             scheduled=data["scheduled"],
             label=data["label"],
+            repeat_weekly=data.get("repeat_weekly", False),
+            tracking_id=data.get("tracking_id"),
+            recurrence_match=data.get("recurrence_match"),
         )
 
 

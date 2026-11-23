@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,12 +22,14 @@ from .api import (
     RttAuthError,
     RttBadRequestError,
     RttError,
+    RttNotFoundError,
     RttRateLimitError,
 )
 from .budget import BudgetDeferred
 from .const import (
     CONF_DIRECTION,
     CONF_IS_REFRESH_TOKEN,
+    CONF_REPEAT_WEEKLY,
     CONF_STATION,
     CONF_STATION_NAME,
     CONF_STATIONS,
@@ -41,6 +43,7 @@ from .const import (
 )
 from .coordinator import Board, BudgetLedger, read_stations, read_tracks
 from .models import LocationCallType, ModeType
+from .recurrence import route_fingerprint
 from .stations import station_labels
 from .tracking import TrackedCall
 
@@ -267,6 +270,7 @@ def _candidate_calls(
             direction,
             scheduled.isoformat(),
             label,
+            recurrence_match=route_fingerprint(row),
         )
         picker_label = label
         if platform and platform.actual:
@@ -295,7 +299,7 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
         """Offer station management and adding or removing train trackers."""
         menu_options = ["add_track", "manage_stations"]
         if read_tracks(self.config_entry):
-            menu_options.append("remove_track")
+            menu_options.extend(["weekly_repeats", "remove_track"])
         return self.async_show_menu(step_id="init", menu_options=menu_options)
 
     async def async_step_manage_stations(
@@ -393,13 +397,13 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
                 except (RttError, BudgetDeferred, ValueError) as err:
                     errors["base"] = _flow_error(err)
                 else:
-                    tracks = read_tracks(self.config_entry)
+                    occupied = self._tracked_call_keys()
                     self._candidates = {
                         key: candidate
                         for key, candidate in _candidate_calls(
                             board, station, direction, stations[station]
                         ).items()
-                        if key not in tracks
+                        if key not in occupied
                     }
                     if self._candidates:
                         return await self.async_step_choose_track()
@@ -433,18 +437,24 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         """Save the selected train's immutable call details."""
         errors = {}
+        repeat_weekly = False
         if user_input is not None:
+            repeat_weekly = user_input.get(CONF_REPEAT_WEEKLY, False)
             key = user_input[CONF_TRACK]
             candidate = self._candidates.get(key)
             tracks = read_tracks(self.config_entry)
             if (
                 candidate
-                and key not in tracks
+                and key not in self._tracked_call_keys()
                 and candidate.track.station in read_stations(self.config_entry)
             ):
-                tracks[key] = candidate.track
-                return self._save_tracks(tracks)
-            errors[CONF_TRACK] = "invalid_selection"
+                if repeat_weekly and candidate.track.recurrence_match is None:
+                    errors["base"] = "cannot_repeat"
+                else:
+                    tracks[key] = replace(candidate.track, repeat_weekly=repeat_weekly)
+                    return self._save_tracks(tracks)
+            else:
+                errors[CONF_TRACK] = "invalid_selection"
         return self.async_show_form(
             step_id="choose_track",
             data_schema=vol.Schema(
@@ -454,7 +464,71 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
                             key: candidate.picker_label
                             for key, candidate in self._candidates.items()
                         }
-                    )
+                    ),
+                    vol.Optional(CONF_REPEAT_WEEKLY, default=repeat_weekly): bool,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_weekly_repeats(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Enable or stop weekly repeats without replacing existing tracker IDs."""
+        tracks = read_tracks(self.config_entry)
+        enabled = [key for key, track in tracks.items() if track.repeat_weekly]
+        errors: dict[str, str] = {}
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        if user_input is not None:
+            enabled = user_input.get(CONF_TRACK, [])
+            if any(key not in tracks for key in enabled):
+                errors[CONF_TRACK] = "invalid_selection"
+            else:
+                fingerprints = {}
+                revised = {}
+                try:
+                    for key, seed in tracks.items():
+                        fingerprint = seed.recurrence_match
+                        if key in enabled and fingerprint is None:
+                            if runtime is None:
+                                return self.async_abort(
+                                    reason="integration_unavailable"
+                                )
+                            current = runtime.coordinator.tracks.get(key, seed)
+                            identity = current.unique_identity
+                            if identity not in fingerprints:
+                                detail = await runtime.api.async_get_service(identity)
+                                fingerprints[identity] = route_fingerprint(detail)
+                            fingerprint = fingerprints[identity]
+                            if fingerprint is None:
+                                errors["base"] = "cannot_repeat"
+                                break
+                        revised[key] = replace(
+                            seed,
+                            repeat_weekly=key in enabled,
+                            recurrence_match=fingerprint,
+                        )
+                except RttAuthError:
+                    self.config_entry.async_start_reauth(self.hass)
+                    errors["base"] = "invalid_auth"
+                except (RttNotFoundError, RttBadRequestError):
+                    errors["base"] = "cannot_repeat"
+                except (RttError, BudgetDeferred, ValueError) as err:
+                    errors["base"] = _flow_error(err)
+                if not errors:
+                    return self._save_tracks(revised)
+        current_tracks = runtime.coordinator.tracks if runtime else tracks
+        return self.async_show_form(
+            step_id="weekly_repeats",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_TRACK, default=enabled): _dropdown(
+                        {
+                            key: f"{current_tracks.get(key, track).label} · {track.direction}"
+                            for key, track in tracks.items()
+                        },
+                        multiple=True,
+                    ),
                 }
             ),
             errors=errors,
@@ -493,3 +567,14 @@ class RealtimeTrainsOptionsFlow(OptionsFlowWithReload):
                 CONF_TRACKS: [track.to_dict() for track in tracks.values()],
             },
         )
+
+    def _tracked_call_keys(self) -> set[str]:
+        """Exclude a recurring rule's current dated occurrence as well as its seed."""
+        keys = set(read_tracks(self.config_entry))
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        if runtime is not None:
+            keys.update(
+                replace(call, tracking_id=None).key
+                for call in runtime.coordinator.tracks.values()
+            )
+        return keys

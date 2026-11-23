@@ -1,6 +1,6 @@
-# Validation — 21 November 2026 (0.2.0)
+# Validation — 23 November 2026 (0.3.0)
 
-- 42 tests passed against the Home Assistant 2025.8.0 fixture on Python 3.13.
+- 58 tests passed against the Home Assistant 2025.8.0 fixture on Python 3.13.
 - Ruff checks and Python compilation passed.
 - The install ZIP was built from an explicit file allowlist and its CRCs checked.
 - No live RTT requests, live Home Assistant changes or HACS install were made.
@@ -13,6 +13,12 @@ The 0.2.0 regressions also verify planned-to-confirmed platform transitions
 without a number change, platform withdrawal, multi-station options and cache
 isolation, sharing one response across staggered calls of the same train, and
 preservation of existing entity IDs and terminal results after station changes.
+The 0.3.0 regressions verify weekly rollover across clock changes, matching
+actual dated timetable identities, refusing ambiguous or incomplete routes,
+skipping missed weeks, cancellation recovery, quota deferral across restarts,
+stable entity IDs with cleared old platform/time data, disabling recurrence
+without reverting the current dated trip, legacy route verification and
+duplicate prevention after rollover.
 
 ## Reproduce on Linux
 

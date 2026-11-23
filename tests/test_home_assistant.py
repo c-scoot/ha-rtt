@@ -168,7 +168,7 @@ async def test_track_from_options_recover_from_timeout_and_restore(
         },
     )
     assert result["step_id"] == "choose_track"
-    (train_selector,) = result["data_schema"].schema.values()
+    train_selector = result["data_schema"].schema[CONF_TRACK]
     (candidate,) = train_selector.config["options"]
     assert "Platform 5 (planned)" in candidate["label"]
     result = await hass.config_entries.options.async_configure(
@@ -423,3 +423,239 @@ async def test_legacy_terminal_platform_remains_confirmed_without_refetch(
     assert [urlsplit(args.args[1]).path for args in session.request.call_args_list] == [
         "/data/stops"
     ]
+
+
+@pytest.mark.parametrize(
+    ("initial_result", "next_date"),
+    [("departed", "2026-03-29"), ("cancelled", "2026-04-26")],
+    ids=["next-week-dst", "cancelled-then-missed-weeks"],
+)
+async def test_weekly_tracker_rolls_over_once_and_can_become_dated_again(
+    hass, session, freezer, monkeypatch, initial_result, next_date
+):
+    initial_id = "gb-nr:L01525:2026-03-22"
+    initial_time = "2026-03-22T09:15:00Z"
+    next_id = f"gb-nr:C30815:{next_date}"
+    next_time = f"{next_date}T09:15:00+01:00"
+    lookup_time = datetime.fromisoformat(f"{next_date}T07:00:00Z")
+    seed = location_call(departure={"scheduleAdvertised": initial_time})
+    upcoming = location_call(departure={"scheduleAdvertised": next_time})
+    completed = location_call(
+        departure={
+            "scheduleAdvertised": initial_time,
+            "realtimeActual": initial_time if initial_result == "departed" else None,
+            "isCancelled": initial_result == "cancelled",
+        },
+        display_as="CANCELLED" if initial_result == "cancelled" else "CALL",
+        platform={"planned": "5", "actual": "6"},
+    )
+    board_queries = []
+    detail_queries = []
+    cancel_next = False
+
+    def request(_method, url, **kwargs):
+        path = urlsplit(url).path
+        params = kwargs["params"]
+        if path == "/rtt/location":
+            board_queries.append(datetime.fromisoformat(params["timeFrom"]))
+            if len(board_queries) == 1:
+                payload = board_response(seed, service_ids=[initial_id])
+            elif len(board_queries) == 2:
+                return response(429, headers={"Retry-After": "900"})[0]
+            else:
+                payload = board_response(upcoming, service_ids=[next_id])
+        elif path == "/rtt/service":
+            current_id = params["uniqueIdentity"]
+            detail_queries.append(current_id)
+            current = completed if current_id == initial_id else upcoming
+            if current_id == next_id and cancel_next:
+                current = location_call(
+                    departure={"scheduleAdvertised": next_time}, display_as="CANCELLED"
+                )
+            payload = service_response(current, unique_identity=current_id)
+        else:
+            payload = {"/api/info": INFO, "/data/stops": STOPS}[path]
+        return response(200, payload)[0]
+
+    freezer.move_to("2026-03-22T09:20:00Z")
+    session.request.side_effect = request
+    entry = await create_entry(hass)
+    result = await open_options(hass, entry, "add_track")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_DIRECTION: "departure", CONF_WINDOW_START: "2026-03-22T09:00:00Z"},
+    )
+    assert result["step_id"] == "choose_track"
+    key = TrackedCall(initial_id, "gb-nr:CLJ", "departure", initial_time, "train").key
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_TRACK: key, "repeat_weekly": True}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options[CONF_TRACKS][0]["repeat_weekly"] is True
+
+    async def refresh():
+        await refresh_tracks(hass, entry, monkeypatch)
+
+    await refresh()
+    state = track_sensor(hass, entry, key, "status")
+    entity_id = state.entity_id
+    assert state.state == initial_result
+    assert state.attributes["repeat_weekly"] is True
+    assert datetime.fromisoformat(
+        state.attributes["weekly_next_scheduled"]
+    ) == datetime.fromisoformat("2026-03-29T08:15:00Z")
+    assert track_sensor(hass, entry, key, "platform").state == "6"
+    for _ in range(2):
+        await refresh()
+    assert detail_queries == [initial_id]
+    assert len(board_queries) == 1
+
+    freezer.move_to(lookup_time)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await refresh()
+    assert len(board_queries) == 2
+    assert board_queries[-1].date().isoformat() == next_date
+    assert detail_queries == [initial_id]
+
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    await refresh()
+    assert len(board_queries) == 2
+    assert track_sensor(hass, entry, key, "status").state == initial_result
+
+    freezer.move_to(lookup_time + timedelta(minutes=16))
+    await refresh()
+    assert len(board_queries) == 3
+    state = track_sensor(hass, entry, key, "status")
+    assert state.entity_id == entity_id
+    assert state.state == "scheduled"
+    assert state.attributes["service_identity"] == next_id
+    assert track_sensor(hass, entry, key, "platform_status").state == "not_available"
+    assert track_sensor(hass, entry, key, "actual").state == "unknown"
+
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    restored = track_sensor(hass, entry, key, "status")
+    assert restored.entity_id == entity_id
+    assert restored.attributes["service_identity"] == next_id
+    await refresh()
+    assert detail_queries == [initial_id, next_id]
+
+    result = await open_options(hass, entry, "add_track")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_DIRECTION: "departure", CONF_WINDOW_START: f"{next_date}T08:00:00Z"},
+    )
+    assert result["step_id"] == "add_track"
+    assert result["errors"] == {"base": "no_services"}
+    assert len(entry.options[CONF_TRACKS]) == 1
+    assert len(board_queries) == 4
+
+    result = await open_options(hass, entry, "weekly_repeats")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_TRACK: []}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert track_sensor(hass, entry, key, "status").entity_id == entity_id
+    effective = entry.runtime_data.coordinator.tracks[key]
+    assert effective.unique_identity == next_id
+    assert not effective.repeat_weekly
+    assert datetime.fromisoformat(effective.scheduled) == datetime.fromisoformat(
+        next_time
+    )
+
+    cancel_next = True
+    await refresh()
+    assert track_sensor(hass, entry, key, "status").state == "cancelled"
+    assert detail_queries == [initial_id, next_id, next_id]
+    freezer.move_to(lookup_time + timedelta(days=7))
+    await refresh()
+    assert len(board_queries) == 4
+    assert detail_queries == [initial_id, next_id, next_id]
+
+
+@pytest.mark.parametrize(
+    "complete_route", [True, False], ids=["verified-route", "missing-route"]
+)
+async def test_enabling_repeat_on_legacy_track_checks_route_through_shared_budget(
+    hass, session, freezer, complete_route
+):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.realtime_trains.const import CONF_STATION_NAME
+    from custom_components.realtime_trains.coordinator import entry_store
+
+    freezer.move_to("2026-03-22T09:20:00Z")
+    dated_service = "gb-nr:L01525:2026-03-22"
+    scheduled = "2026-03-22T09:15:00Z"
+    legacy = {
+        "unique_identity": dated_service,
+        "station": "gb-nr:CLJ",
+        "direction": "departure",
+        "scheduled": scheduled,
+        "label": "09:15 train to Waterloo",
+    }
+    key = TrackedCall.from_dict(legacy).key
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_TOKEN: CREDENTIAL_MARKER,
+            CONF_STATION: legacy["station"],
+            CONF_STATION_NAME: "Clapham Junction (CLJ)",
+        },
+        options={CONF_TRACKS: [legacy]},
+    )
+    entry.add_to_hass(hass)
+    await entry_store(hass, entry).async_save(
+        {
+            "tracks": {
+                key: {
+                    "status": "departed",
+                    "terminal": True,
+                    "scheduled": scheduled,
+                    "next_poll": None,
+                }
+            }
+        }
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entity_id = track_sensor(hass, entry, key, "status").entity_id
+    session.request.assert_not_called()
+
+    detail = service_response(
+        location_call(
+            departure={"scheduleAdvertised": scheduled, "realtimeActual": scheduled}
+        ),
+        unique_identity=dated_service,
+    )
+    if not complete_route:
+        detail["service"]["origin"] = []
+    session.request.return_value = response(200, detail)[0]
+    result = await open_options(hass, entry, "weekly_repeats")
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_TRACK: [key]}
+    )
+    await hass.async_block_till_done()
+    session.request.assert_called_once()
+    args = session.request.call_args
+    assert urlsplit(args.args[1]).path == "/rtt/service"
+    assert args.kwargs["params"] == {"uniqueIdentity": dated_service}
+    assert len(entry.runtime_data.budget.dump()["requests"]) == 1
+
+    saved = entry.options[CONF_TRACKS][0]
+    assert track_sensor(hass, entry, key, "status").entity_id == entity_id
+    if complete_route:
+        assert result["type"] == "create_entry"
+        assert saved["repeat_weekly"] is True
+        assert saved["recurrence_match"] == {
+            "operator": "SW",
+            "origin": ["gb-nr:WOK"],
+            "destination": ["gb-nr:WAT"],
+        }
+    else:
+        assert result["errors"] == {"base": "cannot_repeat"}
+        assert saved == legacy
